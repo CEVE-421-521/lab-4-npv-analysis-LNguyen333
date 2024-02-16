@@ -116,6 +116,7 @@ end
 ```
 
 ```{julia}
+house_area = 795u"ft^2" 
 #| code-fold: true
 heights = uconvert.(u"ft", (0u"ft"):(1u"inch"):(10u"ft")) # some heights we will consider
 plot(
