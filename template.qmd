@@ -1,6 +1,6 @@
 ---
 title: "Lab 4: House Elevation NPV Analysis"
-author: "Your Name"
+author: "Leanh Nguyen"
 jupyter: julia-1.10
 date: 2024-02-08
 week: 5
@@ -11,18 +11,11 @@ format:
 
     # YOU DO NOT NEED BOTH PDF AND DOCX.
     # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
-    pdf:
-        documentclass: article
-        fontsize: 11pt
-        geometry:
-            - margin=1in  
+    docx: 
+        toc: true
+        fig-format: png
         number-sections: true
         code-line-numbers: true
-    #docx: 
-    #    toc: true
-    #    fig-format: png
-    #    number-sections: true
-    #    code-line-numbers: true
 
 # these are optional
 # if you have cache=true, you'll need the jupyter-cache package installed
@@ -50,3 +43,225 @@ Plots.default(; margin=6Plots.mm)
 include("depthdamage.jl")
 ```
 
+# Single Year Function
+First, we're going to write a function that tells us our costs and benefits in a single year.
+The information we'll need for that year is:
+
+- The distribution of flooding at the house
+- The depth-damage function (as in percentage terms)
+- The cost of elevating the house (and the house area)
+- The house value
+- How high we elevated the house **in that year**.
+
+## Depth-damage function
+
+In the previous lab, we used existing data to build a depth-data function.
+Remember that the depth here is relative to the house, not to the gauge.
+```{julia}
+haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame) # read in the file
+desc = "Gift Shop, structure" 
+Source = "USACE - Galveston"
+row = @rsubset(haz_fl_dept, :Description == desc)[1, :] # select the row I want
+dd = DepthDamageData(row) # extract the depth-damage data
+damage_fn = get_depth_damage_function(dd.depths, dd.damages) # get the depth-damage function
+```
+
+We can plot this as before
+
+```{julia}
+#| code-fold: true
+p = let
+    depths = uconvert.(u"ft", (-7.0u"ft"):(1.0u"inch"):(30.0u"ft"))
+    damages = damage_fn.(depths)
+    scatter(
+        depths,
+        damages;
+        xlabel="Flood Depth",
+        ylabel="Damage (%)",
+        label="$(dd.description) ($(dd.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        linewidth=2,
+    )
+end
+p
+```
+
+## Annual expected flood damages
+
+```{julia}
+#| output: false
+    elevation_cost = get_elevation_cost_function() # gives us a fitted interpolator # <7>
+```
+
+
+```{julia}
+function single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
+    
+    # calculate the expected damages
+        house_dist = flood_dist
+        samples = rand(house_dist, 100_000) .* 1u"ft" # <1>
+        damages = damage_fn.(samples) # <2>
+        expected_damages_pct = mean(damages) # <3>
+        expected_damages_usd = house_value * expected_damages_pct / 100
+        c_dmg = expected_damages_usd # <5>
+
+    # calculate the cost of elevating # <6>
+        #| code-fold: true
+        c_constr = elevation_cost(Δh, house_area) 
+
+    # return the total cost and benefit
+    return -c_constr - c_dmg
+end
+```
+
+```{julia}
+#| code-fold: true
+heights = uconvert.(u"ft", (0u"ft"):(1u"inch"):(10u"ft")) # some heights we will consider
+plot(
+    heights,
+    elevation_cost.(heights, house_area);
+    xlabel="How High to Elevate",
+    ylabel="Cost (USD)",
+    label="$(house_area)",
+    tiitle="Cost of Elevating a House",
+)
+```
+
+
+1. Draw 100,000 samples from the distribution of flood heights at the house and add units of feet.
+2. Calculate the damages for each sample using our function.
+3. Calculate the expected damages as the mean of the damages. This is the Monte Carlo strategy $\int p(x) f(x) dx \approx \frac{1}{N} \sum_{i=1}^N f(x)$ which requires $x_i \sim p(x)$.
+4. From Google Earth, I calculated/estimated my target structure's area (795 sq ft). Then, I found a structure near my target structure on zillow that had a similar area (750 sq ft). Thus, I decided to use this as the house structure value. https://www.zillow.com/homedetails/101-21st-St-STE-214-Galveston-TX-77550/2132158257_zpid/ 
+5. We can treat this as the expected cost of flooding for this model.
+6. Next, we have the cost of elevating. We'll use equations I've used before [@zarekarizi_suboptimal:2020, @doss-gollin_subjective:2022]. Essentially, we have a piecewise linear function that depends on the area of the house and how height we elevate.
+7. To get the cost function, we use the `get_elevation_cost_function()` function, which is defined in the `depthdamage.jl` file. This function fits an interpolator to the data, which we want because we don't want to have to re-fit the interpolator every time we want to calculate the cost of elevating the house.
+8. We can visualize this function as follows
+
+# NPV Function
+
+Next, we need to write a function that calculates the NPV over a $T$ year design window.
+This function will take in all the information needed for the `single_year_cost_benefit` function, as well as the number of years `T` and the discount rate.
+Then, it will call the `single_year_cost_benefit` function for each year, and discount the costs and benefits to the present.
+Be sure to set $\Delta h$ to zero feet (you'll get an error without units) for every year after the first!
+
+```{julia}
+function npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh, T, discount_rate)
+    # calculate the costs and benefits for each year, and then discount
+    # see above!
+    npv = 0
+    for i in 1:T
+        if i == 1
+            expected_damages_usd = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
+        else
+            expected_damages_usd = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, 0u"ft") # <1> 
+        end
+        npv += expected_damages_usd * (1 / (1 + discount_rate)^i)
+    end
+    return npv
+end
+```
+
+1. Δh set to zero for subsequent years
+
+# One SOW, several actions
+
+First, let's calculate the NPV for a single state of the world and two actions.
+Now that you have the `npv_cost_benefit` function, this should be straightforward.
+Guess how high you might want to elevate the house, and then calculate the NPV for that action.
+
+```{julia}
+# already defined flood_dist, damage_fn, elevation_cost, house_area, and house_value. Just set Δh
+Δh = 0u"ft" # 0 elevation
+house_value = 221_600 # <4>
+house_area = 795u"ft^2" 
+gauge_dist = GeneralizedExtremeValue(5, 1, 0.1) # hypothetical gauge distribution
+offset = 6.56168 # hypothetical height from house to gauge (building is 2 meters (6.56168 ft) above gauge)
+flood_dist = GeneralizedExtremeValue(gauge_dist.μ - offset, gauge_dist.σ, gauge_dist.ξ)
+
+benefit = single_year_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh)
+println("Single Year Cost Benefit: ", benefit)
+# already defined flood_dist, damage_fn, elevation_cost, house_area, house_value. Just set T and discount rate
+T = 10 #assume looking at 10 year design window
+discount_rate = 0.05 #assume 5% like in example
+npv = npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh, T, discount_rate)
+println("Net Present Value: ", npv)
+```
+
+Compare your elevation to zero feet, and explore a few other elevations. What do you notice?
+- Answered in discussion section
+
+# Sensitivity test
+
+Now let's perform a simple sensitivity test.
+Let's assume that the discount rate is uncertain, as we explored in class.
+Use a Monte Carlo approach to estimate the expected NPV for a range of discount rates.
+As an example, you could use `Normal(4, 2)`, which has a mean of 4 and a standard deviation of 2.
+
+```{julia}
+# Define the range of discount rates
+μ = 4 # Mean
+σ = 2 # Standard deviation
+discount_distribution = Normal(μ, σ)
+
+# Number of discount rate samples: I chose 100 as > 1000 took too long to computationally compute
+number_samples = 100
+
+# Sample discount rates
+discount_rates = rand(discount_distribution, number_samples)
+
+# Calculate NPV for each discount rate sample
+npvs = [npv_cost_benefit(flood_dist, damage_fn, elevation_cost, house_area, house_value, Δh, T, discount_rate) for discount_rate in discount_rates]
+
+# Calculate the expected NPV
+expected_npv = mean(npvs)
+
+# Print the expected NPV
+println("Expected NPV: ", expected_npv)
+```
+
+
+# Discussion
+
+1. What do you notice about the NPV for different actions?
+    - Sample of NPVs for different actions (i.e., how high we elevate the house)
+    - Δh = 0 ft
+        - Single Year Cost Benefit: -2235.8849963730363
+        - Net Present Value: -17346.862410716803
+    - Δh = 5 ft
+        - Single Year Cost Benefit: -88553.95168345135
+        - Net Present Value: -99479.35778305226
+    - Δh = 10 ft
+        - Single Year Cost Benefit: -97497.8065540435
+        - Net Present Value: -108091.47011746021
+    - Δh = 14 ft (the maximum allowed by data)
+        -Single Year Cost Benefit: -113446.010210639
+        - Net Present Value: -123165.26126022344
+    - A negative NPV means that the project is unprofitable. Thus, we can see that elevating this structure would not be profitable. This may be because the structure is located right along the coastline. Then, even without elevating, the structure is vulnerable to flood damages and storm surges. 
+2. What do you notice about the sensitivity test?
+    - I saw that the code too particularly long when I used greater than 100 samples. This could be a sign that this test is computationally intensive for large samples. 
+    - Potential Values for Δh = 0 ft: -679, -8354, -1.53, -948, -2.29
+    - Like the NPVs calculated above, the NPVs calculated in the sensitivity analysis are also negative (unprofitable).
+    - Provides insights into the robustness and variability of the project's NPV under different scenarios (e.g., discount rates). Here's what it tells you:
+    - Monte Carlo sensitivity analysis helps assess the impact of uncertainty in input parameters on NPV. By randomly sampling from probability distributions assigned to key parameters such as cash flows, discount rates, it generates a wide range of possible outcomes, allowing us to quantify the variability and risk associated with NPV estimates.
+    - Through Monte Carlo simulation, we obtain a probability distribution of NPV rather than a single point estimate, which reflects the range of potential NPV values and their respective probabilities of occurrence, providing a more comprehensive understanding of the project.
+    - Monte Carlo sensitivity analysis helps identify which input parameters have the most significant influence on NPV variability, allowing us to explore various scenarios by adjusting input parameters within their specified ranges or distributions. 
+
+3. What are some limitations of this analysis?
+    - What things are missing from this analysis that you think are important
+    How might they affect the results?
+        - While the sensitivity analysis provides insights into the variability of NPV due to changes in discount rates, it may not capture all sources of uncertainty. Other factors such as changes in flood patterns, property value appreciation, or policy changes could also impact NPV but are not considered in this analysis. 
+            - Failure to capture all sources of uncertainty could lead to underestimation or overestimation of project risk. For example, if the analysis overlooks potential changes in flood patterns or regulatory requirements, it may underestimate the true variability of NPV and the probability of adverse outcomes.
+        - The analysis relies on several assumptions and simplifications, such as assuming a constant discount rate over the entire project horizon and using a single depth-damage function for flood damages. These assumptions may not fully capture the complexity and variability of real-world scenarios, leading to potential inaccuracies in NPV estimates. 
+            - Unrealistic assumptions or simplifications may distort NPV estimates and decision-making. For example, if the analysis assumes a constant discount rate but discount rates are expected to fluctuate over time, the NPV estimates may not accurately reflect the time value of money, leading to suboptimal investment decisions.
+        - The analysis focuses solely on the financial aspects of the project and does not consider non-financial factors such as social or environmental impacts. For example, elevating the house may provide benefits beyond monetary gains, like increased resilience to climate change or improved community well-being. 
+            - For example, if the analysis focuses solely on financial metrics without considering social or environmental impacts, it may overlook important benefits or costs associated with the project, leading to incomplete evaluations of project viability.
+        - The accuracy of the analysis depends on the quality and availability of data used to estimate parameters such as flood distributions, depth-damage functions, and elevation costs. Uncertainty or inaccuracies in these data could affect the reliability of NPV estimates. 
+            - Inaccurate or incomplete data can introduce uncertainty and bias into the analysis. For instance, if the depth-damage function used to estimate flood damages is based on outdated or unreliable data, the resulting NPV estimates may be unreliable and not reflective of actual risks and costs.
+        - Risk factors can change over time, and the analysis does not account for potential changes in risk profiles or discount rates during the project lifespan.  
+            - Failure to account for changes in risk profiles over time can lead to misaligned risk management strategies and suboptimal project outcomes. For example, if the analysis assumes static risk factors but risks evolve or intensify over the project lifespan, the chosen risk mitigation measures may be inadequate or ineffective, resulting in unexpected losses.
+
+    - What are some ways you might address these limitations?
+        - Comprehensive Risk Assessment: Conduct a thorough risk assessment to identify and quantify all relevant sources of uncertainty and risk factors affecting project NPV such as gathering additional data, consulting experts, and considering a wider range of scenarios.
+        - Scenario Analysis: Expand the analysis to include scenario planning techniques that explore multiple possible futures and assess the resilience of the project under different scenarios. This can help decision-makers understand the range of potential outcomes and develop adaptive strategies to mitigate risks.
+        - Integration of Non-Financial Factors: Incorporate non-financial considerations, such as social, environmental, and regulatory factors, into the analysis to provide a more holistic evaluation of project impacts and risks.
